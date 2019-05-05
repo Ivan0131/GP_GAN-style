@@ -209,12 +209,14 @@ def setup_snapshot_image_grid(G, training_set,
 
     # Initialize data arrays.
     reals = np.zeros([gw * gh] + training_set.shape, dtype=training_set.dtype)
+    landmarks = np.zeros([gw * gh] + training_set.shape, dtype=training_set.dtype)
+
     labels = np.zeros([gw * gh, training_set.label_size], dtype=training_set.label_dtype)
     latents = np.random.randn(gw * gh, *G.input_shape[1:])
 
     # Random layout.
     if layout == 'random':
-        reals[:], labels[:] = training_set.get_minibatch_np(gw * gh)
+        (reals[:], landmarks[:]), labels[:] = training_set.get_minibatch_np(gw * gh)
 
     # Class-conditional layouts.
     class_layouts = dict(row_per_class=[gw,1], col_per_class=[1,gh], class4x4=[4,4])
@@ -240,6 +242,6 @@ def setup_snapshot_image_grid(G, training_set,
                     reals[x + y * gw] = real[0]
                     labels[x + y * gw] = label[0]
 
-    return (gw, gh), reals, labels, latents
+    return (gw, gh), reals, labels, latents, landmarks
 
 #----------------------------------------------------------------------------

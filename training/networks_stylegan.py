@@ -498,6 +498,7 @@ def G_synthesis(
             x = apply_noise(x, noise_inputs[layer_idx], randomize_noise=randomize_noise)
         x = apply_bias(x)
         x = act(x)
+        print(x.shape, dlatents_in.shape)
         if use_pixel_norm:
             x = pixel_norm(x)
         if use_instance_norm:
@@ -522,7 +523,6 @@ def G_synthesis(
                 x = act(apply_bias(
                     conv2d_downscale2d(blur(x), fmaps=2048/2**(res-1), kernel=3, gain=gain, use_wscale=use_wscale,
                                        fused_scale=fused_scale)))
-                print(x.shape)
             xs[res] = x
     x = layer_epilogue(tf.tile(tf.cast(x, dtype), [tf.shape(dlatents_in)[0], 1, 1, 1]), 0)
 
@@ -562,7 +562,6 @@ def G_synthesis(
     if structure == 'linear':
         images_out = torgb(2, x)
         for res in range(3, resolution_log2 + 1):
-            print(res, x.shape)
             lod = resolution_log2 - res
             x = block(res, x)
             img = torgb(res, x)
