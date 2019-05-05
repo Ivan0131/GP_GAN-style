@@ -104,7 +104,7 @@ def get_path_from_template(path_template: str, path_type: PathType = PathType.AU
     if path_type == PathType.AUTO:
         if platform.system() == "Windows":
             path_type = PathType.WINDOWS
-        elif platform.system() == "Linux":
+        elif platform.system() == "Linux" or platform.system() == "Darwin":
             path_type = PathType.LINUX
         else:
             raise RuntimeError("Unknown platform")
@@ -146,7 +146,7 @@ def get_user_name():
         return _user_name_override
     elif platform.system() == "Windows":
         return os.getlogin()
-    elif platform.system() == "Linux":
+    elif platform.system() == "Linux" or platform.system() == "Darwin":
         try:
             import pwd # pylint: disable=import-error
             return pwd.getpwuid(os.geteuid()).pw_name # pylint: disable=no-member

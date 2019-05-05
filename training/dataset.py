@@ -20,16 +20,20 @@ import dnnlib.tflib as tflib
 def parse_tfrecord_tf(record):
     features = tf.parse_single_example(record, features={
         'shape': tf.FixedLenFeature([3], tf.int64),
-        'data': tf.FixedLenFeature([], tf.string)})
-    data = tf.decode_raw(features['data'], tf.uint8)
-    return tf.reshape(data, features['shape'])
+        'dataA': tf.FixedLenFeature([], tf.string),
+        'dataB': tf.FixedLenFeature([], tf.string)}
+                                       )
+    dataA = tf.decode_raw(features['dataA'], tf.uint8)
+    dataB = tf.decode_raw(features['dataB'], tf.uint8)
+    return tf.reshape(dataA, features['shape']), tf.reshape(dataB, features['shape'])
 
 def parse_tfrecord_np(record):
     ex = tf.train.Example()
     ex.ParseFromString(record)
     shape = ex.features.feature['shape'].int64_list.value # temporary pylint workaround # pylint: disable=no-member
-    data = ex.features.feature['data'].bytes_list.value[0] # temporary pylint workaround # pylint: disable=no-member
-    return np.fromstring(data, np.uint8).reshape(shape)
+    dataA = ex.features.feature['dataA'].bytes_list.value[0] # temporary pylint workaround # pylint: disable=no-member
+    dataB = ex.features.feature['dataB'].bytes_list.value[0]
+    return np.fromstring(dataA, np.uint8).reshape(shape), np.fromstring(dataB, np.uint8).reshape(shape)
 
 #----------------------------------------------------------------------------
 # Dataset class that loads data from tfrecords files.
@@ -74,7 +78,7 @@ class TFRecordDataset:
         for tfr_file in tfr_files:
             tfr_opt = tf.python_io.TFRecordOptions(tf.python_io.TFRecordCompressionType.NONE)
             for record in tf.python_io.tf_record_iterator(tfr_file, tfr_opt):
-                tfr_shapes.append(parse_tfrecord_np(record).shape)
+                tfr_shapes.append(parse_tfrecord_np(record)[0].shape)
                 break
 
         # Autodetect label filename.
@@ -120,7 +124,7 @@ class TFRecordDataset:
                 dset = tf.data.TFRecordDataset(tfr_file, compression_type='', buffer_size=buffer_mb<<20)
                 dset = dset.map(parse_tfrecord_tf, num_parallel_calls=num_threads)
                 dset = tf.data.Dataset.zip((dset, self._tf_labels_dataset))
-                bytes_per_item = np.prod(tfr_shape) * np.dtype(self.dtype).itemsize
+                bytes_per_item = 2*np.prod(tfr_shape) * np.dtype(self.dtype).itemsize
                 if shuffle_mb > 0:
                     dset = dset.shuffle(((shuffle_mb << 20) - 1) // bytes_per_item + 1)
                 if repeat:

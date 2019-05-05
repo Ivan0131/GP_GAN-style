@@ -19,6 +19,34 @@ import train
 from training import dataset
 from training import misc
 from metrics import metric_base
+import random
+
+
+class ImagePool:
+  """ History of generated images
+      Same logic as https://github.com/junyanz/CycleGAN/blob/master/util/image_pool.lua
+  """
+  def __init__(self, pool_size):
+    self.pool_size = pool_size
+    self.images = []
+
+  def query(self, image):
+    if self.pool_size == 0:
+      return image
+
+    if len(self.images) < self.pool_size:
+      self.images.append(image)
+      return image
+    else:
+      p = random.random()
+      if p > 0.5:
+        # use old image
+        random_id = random.randrange(0, self.pool_size)
+        tmp = self.images[random_id].copy()
+        self.images[random_id] = image.copy()
+        return tmp
+      else:
+        return image
 
 #----------------------------------------------------------------------------
 # Just-in-time processing of training images before feeding them to the networks.
@@ -147,6 +175,7 @@ def training_loop(
 
     # Construct networks.
     with tf.device('/gpu:0'):
+    #with tf.device('/cpu:0'):
         if resume_run_id is not None:
             network_pkl = misc.locate_network_pkl(resume_run_id, resume_snapshot)
             print('Loading networks from "%s"...' % network_pkl)
@@ -170,15 +199,23 @@ def training_loop(
     D_opt = tflib.Optimizer(name='TrainD', learning_rate=lrate_in, **D_opt_args)
     for gpu in range(submit_config.num_gpus):
         with tf.name_scope('GPU%d' % gpu), tf.device('/gpu:%d' % gpu):
+        #with tf.name_scope('GPU%d' % gpu), tf.device('/cpu:0'):
             G_gpu = G if gpu == 0 else G.clone(G.name + '_shadow')
             D_gpu = D if gpu == 0 else D.clone(D.name + '_shadow')
             lod_assign_ops = [tf.assign(G_gpu.find_var('lod'), lod_in), tf.assign(D_gpu.find_var('lod'), lod_in)]
-            reals, labels = training_set.get_minibatch_tf()
+            (reals, landmarks), labels = training_set.get_minibatch_tf()
+            (_, next_landmarks), next_labels = training_set.get_minibatch_tf()
+
             reals = process_reals(reals, lod_in, mirror_augment, training_set.dynamic_range, drange_net)
+            landmarks = process_reals(landmarks, lod_in, mirror_augment, training_set.dynamic_range, drange_net)
+
+            latents = tf.random_normal([minibatch_split] + G_gpu.input_shapes[0][1:])
+            fake_images_out = G_gpu.get_output_for(latents, labels, landmarks, is_training=True)
+
             with tf.name_scope('G_loss'), tf.control_dependencies(lod_assign_ops):
-                G_loss = dnnlib.util.call_func_by_name(G=G_gpu, D=D_gpu, opt=G_opt, training_set=training_set, minibatch_size=minibatch_split, **G_loss_args)
+                G_loss = dnnlib.util.call_func_by_name(G=G_gpu, D=D_gpu, opt=G_opt, training_set=training_set, minibatch_size=minibatch_split, reals=reals, landmarks=landmarks, **G_loss_args)
             with tf.name_scope('D_loss'), tf.control_dependencies(lod_assign_ops):
-                D_loss = dnnlib.util.call_func_by_name(G=G_gpu, D=D_gpu, opt=D_opt, training_set=training_set, minibatch_size=minibatch_split, reals=reals, labels=labels, **D_loss_args)
+                D_loss = dnnlib.util.call_func_by_name(G=G_gpu, D=D_gpu, opt=D_opt, training_set=training_set, minibatch_size=minibatch_split, reals=reals, labels=next_labels, landmarks=next_landmarks, **D_loss_args)
             G_opt.register_gradients(tf.reduce_mean(G_loss), G_gpu.trainables)
             D_opt.register_gradients(tf.reduce_mean(D_loss), D_gpu.trainables)
     G_train_op = G_opt.apply_updates()
@@ -186,6 +223,7 @@ def training_loop(
 
     Gs_update_op = Gs.setup_as_moving_average_of(G, beta=Gs_beta)
     with tf.device('/gpu:0'):
+    #with tf.device('/cpu:0'):
         try:
             peak_gpu_mem_op = tf.contrib.memory_stats.MaxBytesInUse()
         except tf.errors.NotFoundError:

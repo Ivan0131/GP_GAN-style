@@ -302,6 +302,7 @@ def minibatch_stddev_layer(x, group_size=4, num_new_features=1):
 def G_style(
     latents_in,                                     # First input: Latent vectors (Z) [minibatch, latent_size].
     labels_in,                                      # Second input: Conditioning labels [minibatch, label_size].
+    landmark_in,
     truncation_psi          = 0.7,                  # Style strength multiplier for the truncation trick. None = disable.
     truncation_cutoff       = 8,                    # Number of layers for which to apply the truncation trick. None = disable.
     truncation_psi_val      = None,                 # Value for truncation_psi to use during validation.
@@ -311,7 +312,7 @@ def G_style(
     is_training             = False,                # Network is under training? Enables and disables specific features.
     is_validation           = False,                # Network is under validation? Chooses which value to use for truncation_psi.
     is_template_graph       = False,                # True = template graph constructed by the Network class, False = actual evaluation.
-    components              = dnnlib.EasyDict(),    # Container for sub-networks. Retained between calls.
+    components = dnnlib.EasyDict(),    # Container for sub-networks. Retained between calls.
     **kwargs):                                      # Arguments for sub-networks (G_mapping and G_synthesis).
 
     # Validate arguments.
@@ -328,6 +329,7 @@ def G_style(
         dlatent_avg_beta = None
     if not is_training or (style_mixing_prob is not None and not tflib.is_tf_expression(style_mixing_prob) and style_mixing_prob <= 0):
         style_mixing_prob = None
+
 
     # Setup components.
     if 'synthesis' not in components:
@@ -375,7 +377,7 @@ def G_style(
 
     # Evaluate synthesis network.
     with tf.control_dependencies([tf.assign(components.synthesis.find_var('lod'), lod_in)]):
-        images_out = components.synthesis.get_output_for(dlatents, force_clean_graph=is_template_graph, **kwargs)
+        images_out = components.synthesis.get_output_for(dlatents, landmark_in, force_clean_graph=is_template_graph, **kwargs)
     return tf.identity(images_out, name='images_out')
 
 #----------------------------------------------------------------------------
@@ -439,6 +441,7 @@ def G_mapping(
 
 def G_synthesis(
     dlatents_in,                        # Input: Disentangled latents (W) [minibatch, num_layers, dlatent_size].
+    landmark_in,
     dlatent_size        = 512,          # Disentangled latent (W) dimensionality.
     num_channels        = 3,            # Number of output color channels.
     resolution          = 1024,         # Output resolution.
@@ -476,6 +479,9 @@ def G_synthesis(
     # Primary inputs.
     dlatents_in.set_shape([None, num_styles, dlatent_size])
     dlatents_in = tf.cast(dlatents_in, dtype)
+    landmark_in.set_shape([None, num_channels, resolution, resolution])
+    landmark_in = tf.cast(landmark_in, dtype)
+
     lod_in = tf.cast(tf.get_variable('lod', initializer=np.float32(0), trainable=False), dtype)
 
     # Noise inputs.
@@ -501,21 +507,41 @@ def G_synthesis(
         return x
 
     # Early layers.
-    with tf.variable_scope('4x4'):
-        if const_input_layer:
-            with tf.variable_scope('Const'):
-                x = tf.get_variable('const', shape=[1, nf(1), 4, 4], initializer=tf.initializers.ones())
-                x = layer_epilogue(tf.tile(tf.cast(x, dtype), [tf.shape(dlatents_in)[0], 1, 1, 1]), 0)
-        else:
-            with tf.variable_scope('Dense'):
-                x = dense(dlatents_in[:, 0], fmaps=nf(1)*16, gain=gain/4, use_wscale=use_wscale) # tweak gain to match the official implementation of Progressing GAN
-                x = layer_epilogue(tf.reshape(x, [-1, nf(1), 4, 4]), 0)
-        with tf.variable_scope('Conv'):
-            x = layer_epilogue(conv2d(x, fmaps=nf(1), kernel=3, gain=gain, use_wscale=use_wscale), 1)
+    #with tf.variable_scope('4x4'):
+    def fromrgb(x, res):  # res = 2..resolution_log2
+        with tf.variable_scope('FromRGB_lod%d' % (resolution_log2 - res)):
+            return act(apply_bias(conv2d(x, fmaps=2048/2**res, kernel=1, gain=gain, use_wscale=use_wscale)))
+
+    xs = {}
+    x = fromrgb(landmark_in, resolution_log2)
+    for res in range(resolution_log2, 2, -1):
+        with tf.variable_scope('%dx%d' % (2 ** (res-1), 2 ** (res-1))):
+            with tf.variable_scope('Conv0'):
+                x = act(apply_bias(conv2d(x, fmaps=2048/2**res, kernel=3, gain=gain, use_wscale=use_wscale)))
+            with tf.variable_scope('Conv1_down'):
+                x = act(apply_bias(
+                    conv2d_downscale2d(blur(x), fmaps=2048/2**(res-1), kernel=3, gain=gain, use_wscale=use_wscale,
+                                       fused_scale=fused_scale)))
+                print(x.shape)
+            xs[res] = x
+    x = layer_epilogue(tf.tile(tf.cast(x, dtype), [tf.shape(dlatents_in)[0], 1, 1, 1]), 0)
+
+        # if const_input_layer:
+        #     with tf.variable_scope('Const'):
+        #         x = tf.get_variable('const', shape=[1, nf(1), 4, 4], initializer=tf.initializers.ones())
+        #         x = layer_epilogue(tf.tile(tf.cast(x, dtype), [tf.shape(dlatents_in)[0], 1, 1, 1]), 0)
+        # else:
+        #     with tf.variable_scope('Dense'):
+        #         x = dense(dlatents_in[:, 0], fmaps=nf(1)*16, gain=gain/4, use_wscale=use_wscale) # tweak gain to match the official implementation of Progressing GAN
+        #         x = layer_epilogue(tf.reshape(x, [-1, nf(1), 4, 4]), 0)
+        # with tf.variable_scope('Conv'):
+        #     x = layer_epilogue(conv2d(x, fmaps=nf(1), kernel=3, gain=gain, use_wscale=use_wscale), 1)
 
     # Building blocks for remaining layers.
     def block(res, x): # res = 3..resolution_log2
         with tf.variable_scope('%dx%d' % (2**res, 2**res)):
+            if res != 3:
+                x = tf.concat([x, xs[res]], axis=1)
             with tf.variable_scope('Conv0_up'):
                 x = layer_epilogue(blur(upscale2d_conv2d(x, fmaps=nf(res-1), kernel=3, gain=gain, use_wscale=use_wscale, fused_scale=fused_scale)), res*2-4)
             with tf.variable_scope('Conv1'):
@@ -536,6 +562,7 @@ def G_synthesis(
     if structure == 'linear':
         images_out = torgb(2, x)
         for res in range(3, resolution_log2 + 1):
+            print(res, x.shape)
             lod = resolution_log2 - res
             x = block(res, x)
             img = torgb(res, x)

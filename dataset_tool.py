@@ -63,11 +63,11 @@ class TFRecordExporter:
         np.random.RandomState(123).shuffle(order)
         return order
 
-    def add_image(self, img):
+    def add_image(self, img1, img2):
         if self.print_progress and self.cur_images % self.progress_interval == 0:
             print('%d / %d\r' % (self.cur_images, self.expected_images), end='', flush=True)
         if self.shape is None:
-            self.shape = img.shape
+            self.shape = img1.shape
             self.resolution_log2 = int(np.log2(self.shape[1]))
             assert self.shape[0] in [1, 3]
             assert self.shape[1] == self.shape[2]
@@ -76,15 +76,23 @@ class TFRecordExporter:
             for lod in range(self.resolution_log2 - 1):
                 tfr_file = self.tfr_prefix + '-r%02d.tfrecords' % (self.resolution_log2 - lod)
                 self.tfr_writers.append(tf.python_io.TFRecordWriter(tfr_file, tfr_opt))
-        assert img.shape == self.shape
+        assert img1.shape == self.shape
+        assert img1.shape == img2.shape
         for lod, tfr_writer in enumerate(self.tfr_writers):
             if lod:
-                img = img.astype(np.float32)
-                img = (img[:, 0::2, 0::2] + img[:, 0::2, 1::2] + img[:, 1::2, 0::2] + img[:, 1::2, 1::2]) * 0.25
-            quant = np.rint(img).clip(0, 255).astype(np.uint8)
+                img1 = img1.astype(np.float32)
+                img1 = (img1[:, 0::2, 0::2] + img1[:, 0::2, 1::2] + img1[:, 1::2, 0::2] + img1[:, 1::2, 1::2]) * 0.25
+
+                img2 = img2.astype(np.float32)
+                img2 = (img2[:, 0::2, 0::2] + img2[:, 0::2, 1::2] + img2[:, 1::2, 0::2] + img2[:, 1::2, 1::2]) * 0.25
+            quant1 = np.rint(img1).clip(0, 255).astype(np.uint8)
+            quant2 = np.rint(img2).clip(0, 255).astype(np.uint8)
+
             ex = tf.train.Example(features=tf.train.Features(feature={
-                'shape': tf.train.Feature(int64_list=tf.train.Int64List(value=quant.shape)),
-                'data': tf.train.Feature(bytes_list=tf.train.BytesList(value=[quant.tostring()]))}))
+                'shape': tf.train.Feature(int64_list=tf.train.Int64List(value=quant1.shape)),
+                'dataA': tf.train.Feature(bytes_list=tf.train.BytesList(value=[quant1.tostring()])),
+                'dataB': tf.train.Feature(bytes_list=tf.train.BytesList(value=[quant2.tostring()]))
+            }))
             tfr_writer.write(ex.SerializeToString())
         self.cur_images += 1
 
@@ -502,11 +510,12 @@ def create_celeba(tfrecord_dir, celeba_dir, cx=89, cy=121):
 
 def create_from_images(tfrecord_dir, image_dir, shuffle):
     print('Loading images from "%s"' % image_dir)
-    image_filenames = sorted(glob.glob(os.path.join(image_dir, '*')))
-    if len(image_filenames) == 0:
+    imageA_filenames = sorted(glob.glob(os.path.join(image_dir+"/trainA", '*')))
+    #imageB_filenames = sorted(glob.glob(os.path.join(image_dir + "/trainB", '*')))
+    if len(imageA_filenames) == 0:
         error('No input images found')
 
-    img = np.asarray(PIL.Image.open(image_filenames[0]))
+    img = np.asarray(PIL.Image.open(imageA_filenames[0]))
     resolution = img.shape[0]
     channels = img.shape[2] if img.ndim == 3 else 1
     if img.shape[1] != resolution:
@@ -516,15 +525,22 @@ def create_from_images(tfrecord_dir, image_dir, shuffle):
     if channels not in [1, 3]:
         error('Input images must be stored as RGB or grayscale')
 
-    with TFRecordExporter(tfrecord_dir, len(image_filenames)) as tfr:
-        order = tfr.choose_shuffled_order() if shuffle else np.arange(len(image_filenames))
+    with TFRecordExporter(tfrecord_dir, len(imageA_filenames)) as tfr:
+        order = tfr.choose_shuffled_order() if shuffle else np.arange(len(imageA_filenames))
         for idx in range(order.size):
-            img = np.asarray(PIL.Image.open(image_filenames[order[idx]]))
+            imgA_path = imageA_filenames[order[idx]]
+            imgA_name = os.path.basename(imgA_path)
+            imgB_name = imgA_name[:-5] + "B.jpg"
+            imgB_path = os.path.join(image_dir+"/trainB", imgB_name)
+            imgA = np.asarray(PIL.Image.open(imgA_path))
+            imgB = np.asarray(PIL.Image.open(imgB_path))
             if channels == 1:
-                img = img[np.newaxis, :, :] # HW => CHW
+                imgA = imgA[np.newaxis, :, :] # HW => CHW
+                imgB = imgB[np.newaxis, :, :]
             else:
-                img = img.transpose([2, 0, 1]) # HWC => CHW
-            tfr.add_image(img)
+                imgA = imgA.transpose([2, 0, 1]) # HWC => CHW
+                imgB = imgB.transpose([2, 0, 1])
+            tfr.add_image(imgA, imgB)
 
 #----------------------------------------------------------------------------
 
